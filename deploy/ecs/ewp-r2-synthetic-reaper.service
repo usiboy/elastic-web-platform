@@ -1,0 +1,8 @@
+[Unit]
+Description=Reap only failed synthetic R2 runtime after durable route rollback
+After=ewp-r2-site-gateway-20261008.service ewp-builder-dockerd-20261007.service
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash /data/ewp-builder-20261007/state/reap_failed_r2_synthetic.sh
+TimeoutStartSec=20

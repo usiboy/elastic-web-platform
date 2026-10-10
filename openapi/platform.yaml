@@ -1,0 +1,929 @@
+openapi: 3.1.0
+info:
+  title: 弹性网站平台控制 API（静态站点本地交付闭环）
+  version: 0.11.0
+  description: |
+    提供 Team/Project/短期作用域令牌、受限 tar.gz 源码收件、Owner GitHub OAuth 仓库授权和撤销 webhook。
+    上传状态 stored_unverified、webhook 状态 pending_commit_verification 均不表示网站上线。
+    操作员可对已验证仓库的固定 Git SHA 拉取并核实实际源码字节，得到 verified_source；
+    普通静态 HTML 可在本机由 Agent 上传或已绑定 GitHub webhook 自动生成 candidate，
+    访问独立 HTTPS Preview；真实网关读回后可晋升/回滚单区域别名。
+    期望路由与已观察代际分开，不代表正式 DNS/多节点 SaaS 上线。
+    固定 A/B 试点验证过 runsc 离线构建，但通用 Vite 自动 Builder、正式 Preview 域名和全球发布尚未实现。
+    CPU/内存/存储的 Team 预算和 Project 预留只由数据库事务仲裁；state=reserved_not_provisioned 不代表运行时已执行资源硬限。
+servers:
+  - url: http://127.0.0.1:8097
+    description: 本机开发（仅回环明文）
+security:
+  - bearerAuth: []
+paths:
+  /livez:
+    get:
+      security: []
+      summary: 进程存活
+      responses:
+        '200': {description: 进程存活}
+  /readyz:
+    get:
+      security: []
+      summary: 数据库可访问
+      responses:
+        '200': {description: 数据库可访问}
+        '503': {description: 数据库不可访问}
+  /v1/me:
+    get:
+      summary: 查询当前 Team 角色和 Agent 的项目/操作作用域
+      description: 不返回 Bearer 明文，撤销或过期后立即拒绝；供本机工作台显示真实权限。
+      responses:
+        '200':
+          description: 当前有效平台身份
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [teamId, role, actions, expiresAt]
+                properties:
+                  teamId: {type: string}
+                  role: {type: string, enum: [owner, developer, viewer, agent]}
+                  projectId: {type: string}
+                  actions: {type: array, items: {type: string}}
+                  expiresAt: {type: string, format: date-time}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '503': {description: 身份数据库不可用}
+  /v1/teams:
+    post:
+      summary: 操作员引导 Team
+      description: |
+        仅使用服务端 BOOTSTRAP_TOKEN。首次 201 响应只返回一次 ownerToken；
+        同一 Idempotency-Key 重试返回 200 且不重复返回秘密。初期只用于受控引导。
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [slug, name]
+              additionalProperties: false
+              properties:
+                slug: {type: string, pattern: '^[a-z0-9][a-z0-9-]*$'}
+                name: {type: string, maxLength: 120}
+      responses:
+        '201':
+          description: 已创建 Team，ownerToken 仅此响应提供
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [id, slug, name, ownerToken]
+                properties:
+                  id: {type: string}
+                  slug: {type: string}
+                  name: {type: string}
+                  ownerToken: {type: string, description: 仅返回一次的随机凭证}
+        '200': {description: 相同请求重试，仅返回 Team 信息}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '422': {$ref: '#/components/responses/Invalid'}
+  /v1/teams/{teamId}/projects:
+    parameters:
+      - $ref: '#/components/parameters/TeamId'
+    get:
+      summary: 列出当前凭证能访问的 Project
+      parameters:
+        - in: query
+          name: cursor
+          schema: {type: string}
+          description: 前页 nextCursor；每页最多 100 条，按 Project ID 排序
+      responses:
+        '200':
+          description: Team 内项目列表
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [projects, hasMore]
+                properties:
+                  projects:
+                    type: array
+                    items: {$ref: '#/components/schemas/Project'}
+                  hasMore: {type: boolean}
+                  nextCursor: {type: string}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+    post:
+      summary: 新建 Project 草稿（Owner/Developer）
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [slug, name]
+              additionalProperties: false
+              properties:
+                slug: {type: string, pattern: '^[a-z0-9][a-z0-9-]*$'}
+                name: {type: string, maxLength: 120}
+      responses:
+        '201':
+          description: 项目已创建，仅为草稿
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Project'}
+        '200': {description: 相同请求重试，返回原项目}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '422': {$ref: '#/components/responses/Invalid'}
+  /v1/teams/{teamId}/projects/{projectId}:
+    parameters:
+      - $ref: '#/components/parameters/TeamId'
+      - in: path
+        name: projectId
+        required: true
+        schema: {type: string}
+    get:
+      summary: 查询本 Team 内项目（Agent 仅限获授项目）
+      responses:
+        '200':
+          description: 项目详情
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Project'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /v1/admin/teams/{teamId}/resource-budget:
+    parameters:
+      - $ref: '#/components/parameters/TeamId'
+    put:
+      summary: 运维引导 Team 的 CPU/内存/存储预留预算
+      description: |
+        仅服务端 BOOTSTRAP_TOKEN；expectedVersion=0 表示首次配置，其后逐次 CAS。
+        预算不得缩到当前 Project 预留总和以下；修改不改变真实 ECS/cgroup 资源。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ResourceBudgetChange'}
+      responses:
+        '201': {description: 首次创建预算，state=budgeted_not_provisioned}
+        '200': {description: 已按预期版本修改预算}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '422': {$ref: '#/components/responses/Invalid'}
+  /v1/teams/{teamId}/resources:
+    parameters:
+      - $ref: '#/components/parameters/TeamId'
+    get:
+      summary: 查询本 Team 的预算、项目预留合计和剩余额度
+      description: Owner/Developer/Viewer 可读取；Agent 不可读取 Team 总预算。单条 SQL 快照读取，不代表运行时实际用量。
+      responses:
+        '200':
+          description: 当前预留汇总
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/TeamResourceSummary'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /v1/teams/{teamId}/projects/{projectId}/resources:
+    parameters:
+      - $ref: '#/components/parameters/TeamId'
+      - $ref: '#/components/parameters/ProjectId'
+    get:
+      summary: 读取本项目资源预留
+      description: 未预留时 version=0、state=unallocated；项目作用域 Agent 需要 projects:read。
+      responses:
+        '200':
+          description: 项目预留或未分配状态
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ProjectResourceReservation'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+    put:
+      summary: Owner 在预算内预留或释放项目资源
+      description: |
+        同 Team 预算变更和各 Project 预留由 teams 行锁串行仲裁，超额 409；expectedVersion 为 CAS 版本。
+        三种资源全部置零表示释放预留。只写控制面数据库，不启动 Node、分配卷或实施主机硬限。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ResourceReservationChange'}
+      responses:
+        '201':
+          description: 首次预留，state=reserved_not_provisioned
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ProjectResourceReservation'}
+        '200': {description: 更新或释放预留}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '422': {$ref: '#/components/responses/Invalid'}
+  /v1/teams/{teamId}/projects/{projectId}/sources/uploads:
+    parameters:
+      - $ref: '#/components/parameters/TeamId'
+      - $ref: '#/components/parameters/ProjectId'
+    post:
+      summary: Owner/Developer 或项目级 Agent 上传受限源码归档
+      description: |
+        Content-Type 必须是 application/gzip；请求体最多 1 MiB、128 个常规文件，
+        不执行上传代码。仅生成 stored_unverified 来源元数据。
+        Agent 需要 sources:upload 操作与匹配的 projectId。
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/gzip:
+            schema: {type: string, format: binary}
+      responses:
+        '201':
+          description: 仅已保存来源，尚未构建
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/UploadedSource'}
+        '200': {description: 相同请求重试，返回原来源}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '413': {description: 归档超过最大尺寸}
+        '415': {description: 错误的 Content-Type}
+        '422': {$ref: '#/components/responses/Invalid'}
+        '503': {description: 本地开发存储不可用}
+  /v1/teams/{teamId}/projects/{projectId}/sources/{sourceId}:
+    parameters:
+      - $ref: '#/components/parameters/TeamId'
+      - $ref: '#/components/parameters/ProjectId'
+      - in: path
+        name: sourceId
+        required: true
+        schema: {type: string}
+    get:
+      summary: 读取本项目来源元数据并核对归档字节仍可读
+      responses:
+        '200':
+          description: 来源元数据
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/UploadedSource'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '503': {description: 归档不可用或摘要不一致}
+  /v1/teams/{teamId}/projects/{projectId}/github-binding:
+    parameters:
+      - $ref: '#/components/parameters/TeamId'
+      - $ref: '#/components/parameters/ProjectId'
+    get:
+      summary: 查看由 Owner 用户授权或运维绑定的 GitHub App 仓库核验状态
+      responses:
+        '200':
+          description: 绑定状态
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/GitHubBinding'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /v1/teams/{teamId}/projects/{projectId}/github-connect:
+    parameters:
+      - $ref: '#/components/parameters/TeamId'
+      - $ref: '#/components/parameters/ProjectId'
+    post:
+      summary: Team Owner 发起 GitHub App 用户授权与仓库绑定
+      description: |
+        只接受当前 Team Owner，传入 Installation ID/Repository ID；生成 10 分钟一次性随机 state，
+        数据库仅存 SHA-256，PKCE verifier 由服务端密钥和 state 推导。未完成用户授权前仓库不可标 verified；
+        被撤销的绑定只能由 Owner 重新走用户授权恢复，运维同仓库重验不会绕过撤销。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [installationId, repositoryId]
+              additionalProperties: false
+              properties:
+                installationId: {type: integer, format: int64, minimum: 1}
+                repositoryId: {type: integer, format: int64, minimum: 1}
+      responses:
+        '201':
+          description: GitHub 授权 URL，仅对 Owner 返回、no-store
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [authorizationUrl, expiresAt]
+                properties:
+                  authorizationUrl: {type: string, format: uri}
+                  expiresAt: {type: string, format: date-time}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '503': {description: App/OAuth 或数据库不可用}
+  /v1/teams/{teamId}/projects/{projectId}/github-pushes:
+    parameters:
+      - $ref: '#/components/parameters/TeamId'
+      - $ref: '#/components/parameters/ProjectId'
+    get:
+      summary: 按收到时间倒序读取本项目 Git 来源处理状态
+      description: 每页最多 20 条，只有可读该项目的身份可访问；awaiting_isolated_build 不代表已执行构建，也不生成站点 URL。
+      parameters:
+        - in: query
+          name: cursor
+          schema: {type: string, maxLength: 512}
+          description: 前页返回的 nextCursor；按收到时间与 Delivery ID 稳定翻页
+      responses:
+        '200':
+          description: 真实 Git 推送与固定来源状态，无已签构建证明时保持待隔离构建
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [pushes, hasMore]
+                properties:
+                  pushes:
+                    type: array
+                    items:
+                      type: object
+                      required: [deliveryId, commitSha, ref, status, attempts, origin, receivedAt]
+                      properties:
+                        deliveryId: {type: string}
+                        commitSha: {type: string}
+                        ref: {type: string}
+                        status: {type: string, enum: [pending_commit_verification, awaiting_isolated_build, preview_candidate, production_requested, superseded, failed]}
+                        attempts: {type: integer, minimum: 0}
+                        origin: {type: string, enum: [webhook, app_poll]}
+                        receivedAt: {type: string, format: date-time}
+                        errorCode: {type: string, description: 作业超期失败时为 build_job_expired；不生成可访问部署，也不切换原生产别名}
+                        sourceId: {type: string}
+                        deploymentId: {type: string}
+                  hasMore: {type: boolean}
+                  nextCursor: {type: string}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '422': {description: 无效游标}
+        '503': {description: 来源状态不可读}
+  /v1/teams/{teamId}/projects/{projectId}/github-pushes/{deliveryId}:
+    parameters:
+      - $ref: '#/components/parameters/TeamId'
+      - $ref: '#/components/parameters/ProjectId'
+      - in: path
+        name: deliveryId
+        required: true
+        schema: {type: string}
+    get:
+      summary: 查询已验签 push 的固定来源与自动处理状态
+      responses:
+        '200':
+          description: 同 Team 的 Git 来源状态；候选和生产请求不等于公网已 active
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [deliveryId, commitSha, ref, status, attempts]
+                properties:
+                  deliveryId: {type: string}
+                  commitSha: {type: string}
+                  ref: {type: string}
+                  status:
+                    type: string
+                    enum: [pending_commit_verification, awaiting_isolated_build, preview_candidate, production_requested, superseded, failed]
+                  attempts: {type: integer}
+                  sourceId: {type: string}
+                  deploymentId: {type: string}
+                  errorCode: {type: string, description: 作业超期失败时为 build_job_expired；不生成可访问部署，也不切换原生产别名}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '503': {description: 来源状态不可读}
+  /v1/teams/{teamId}/projects/{projectId}/sources/github/{sourceId}:
+    parameters:
+      - $ref: '#/components/parameters/TeamId'
+      - $ref: '#/components/parameters/ProjectId'
+      - in: path
+        name: sourceId
+        required: true
+        schema: {type: string}
+    get:
+      summary: 查询固定 Git 来源的实际归档摘要与提交/树 SHA
+      description: 对保存的源码包做摘要读回；不提供构建或网站 URL。
+      responses:
+        '200':
+          description: 已验证的固定源码元数据
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/PinnedGitSource'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '503': {description: 来源字节不可读或摘要不匹配}
+  /v1/teams/{teamId}/projects/{projectId}/deployments:
+    parameters:
+      - $ref: '#/components/parameters/TeamId'
+      - $ref: '#/components/parameters/ProjectId'
+    get:
+      summary: 游标分页读取本项目真实部署历史
+      parameters:
+        - in: query
+          name: cursor
+          schema: {type: string}
+          description: 前页返回的 nextCursor，最多 20 条/页
+      responses:
+        '200':
+          description: 候选/观察态及来源；不将 requested 冒充 active
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [deployments, hasMore]
+                properties:
+                  deployments:
+                    type: array
+                    items:
+                      type: object
+                      required: [deploymentId, desiredState, observedState, sourceKind, createdAt]
+                      properties:
+                        deploymentId: {type: string}
+                        desiredHost: {type: string}
+                        desiredState: {type: string}
+                        observedState: {type: string}
+                        sourceKind: {type: string}
+                        sourceId: {type: string}
+                        createdAt: {type: string, format: date-time}
+                  hasMore: {type: boolean}
+                  nextCursor: {type: string}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '422': {$ref: '#/components/responses/Invalid'}
+    post:
+      summary: 为无需构建的静态 HTML 源码创建候选部署
+      description: |
+        要求 Owner/Developer 或具 deployments:create 操作的单项目 Agent。
+        只做安全静态字节复制，Vite/Next.js 返回 isolated_build_required；
+        202 的 desiredHost 不是已可访问的 Preview URL，直到网关实际 HTTPS 读回。
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [sourceId]
+              additionalProperties: false
+              properties:
+                sourceId: {type: string}
+      responses:
+        '202':
+          description: 已保存候选，观察态仍是 not_deployed
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/StaticDeployment'}
+        '200': {description: 相同请求复用候选}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '422': {$ref: '#/components/responses/Invalid'}
+        '503': {description: 来源/制品存储或路由配置不可用}
+  /v1/teams/{teamId}/projects/{projectId}/deployments/{deploymentId}:
+    parameters:
+      - $ref: '#/components/parameters/TeamId'
+      - $ref: '#/components/parameters/ProjectId'
+      - $ref: '#/components/parameters/DeploymentId'
+    get:
+      summary: 查询候选、Preview 实际读回状态
+      responses:
+        '200':
+          description: 期望态与观察态分开
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/StaticDeployment'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '503': {description: 制品字节不可核验}
+  /v1/teams/{teamId}/projects/{projectId}/deployments/{deploymentId}/preview-exchanges:
+    parameters:
+      - $ref: '#/components/parameters/TeamId'
+      - $ref: '#/components/parameters/ProjectId'
+      - $ref: '#/components/parameters/DeploymentId'
+    post:
+      summary: 签发绑定 Team/Project/Deployment 的 60 秒一次性交换码
+      description: |
+        仅本 Team 有效成员及 previews:read Agent 可调用；返回 code 只在响应中出现。
+        客户端将其在受信 HTTPS Preview Host 的 POST /session/exchange 表单正文中消费，
+        网关建立 Host-only Secure/HttpOnly Cookie 并逐资源复核原成员令牌的撤权状态。
+      responses:
+        '201':
+          description: 一次性交换码，禁止放在 URL 或日志中
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [code, desiredHost, expiresAt]
+                properties:
+                  code: {type: string}
+                  desiredHost: {type: string}
+                  expiresAt: {type: string, format: date-time}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '503': {description: 数据库不可用}
+  /v1/teams/{teamId}/projects/{projectId}/aliases/production:
+    parameters:
+      - $ref: '#/components/parameters/TeamId'
+      - $ref: '#/components/parameters/ProjectId'
+    get:
+      summary: 查询生产别名期望/实际代际
+      responses:
+        '200':
+          description: 未经真实 HTTP 读回时 state 为 requested
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ProductionAlias'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /v1/teams/{teamId}/projects/{projectId}/aliases/production:promote:
+    parameters:
+      - $ref: '#/components/parameters/TeamId'
+      - $ref: '#/components/parameters/ProjectId'
+    post:
+      summary: Owner 请求生产晋升，须先观察到真实 Preview
+      requestBody:
+        $ref: '#/components/requestBodies/AliasRequest'
+      responses:
+        '202': {description: 只记新期望代际，不能误报为 active}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /v1/teams/{teamId}/projects/{projectId}/aliases/production:rollback:
+    parameters:
+      - $ref: '#/components/parameters/TeamId'
+      - $ref: '#/components/parameters/ProjectId'
+    post:
+      summary: Owner 将新别名代际指向已核验的旧部署
+      requestBody:
+        $ref: '#/components/requestBodies/AliasRequest'
+      responses:
+        '202': {description: 回滚意图，实际 HTTP 读回后才 active}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /v1/admin/teams/{teamId}/projects/{projectId}/github-binding:
+    parameters:
+      - $ref: '#/components/parameters/TeamId'
+      - $ref: '#/components/parameters/ProjectId'
+    post:
+      summary: 运维将仓库指派给 Team 并用 GitHub App 验证安装范围
+      description: |
+        仅 BOOTSTRAP_TOKEN 可调用；普通 Team Owner 不能凭可猜测的 Installation ID
+        把其他人的仓库绑定到自己项目。没有 App 身份时保存 pending，不能触发构建；
+        相同仓库重试可升级为 verified，不同仓库冲突。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [installationId, repositoryId]
+              additionalProperties: false
+              properties:
+                installationId: {type: integer, format: int64, minimum: 1}
+                repositoryId: {type: integer, format: int64, minimum: 1}
+      responses:
+        '200':
+          description: 安装令牌被限定到该仓库且元数据复核通过
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/GitHubBinding'}
+        '202': {description: 待 GitHub App 身份配置，仅保存 pending}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '422': {$ref: '#/components/responses/Invalid'}
+        '503': {description: GitHub App 或数据库不可用，未标记 verified}
+  /v1/admin/teams/{teamId}/projects/{projectId}/github-pushes/{deliveryId}:verify:
+    parameters:
+      - $ref: '#/components/parameters/TeamId'
+      - $ref: '#/components/parameters/ProjectId'
+      - in: path
+        name: deliveryId
+        required: true
+        schema: {type: string}
+    post:
+      summary: 运维对待核验 push 重新取固定 Git SHA、Tree 和 Blob 字节
+      description: |
+        要求 BOOTSTRAP_TOKEN、已核验的本项目仓库绑定与配置好的 SOURCE_STORE_DIR。
+        逐字节校验 Git blob 对象 SHA，生成确定性 tar.gz 并保存实际 SHA-256；
+        仅返回 verified_source，不启动 Builder、Deployment 或变更 Project 状态。
+      responses:
+        '201':
+          description: 首次核验并保存固定 Git 来源
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/PinnedGitSource'}
+        '200': {description: 相同 push 的幂等复核，只读回已保存字节}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '422': {$ref: '#/components/responses/Invalid'}
+        '503': {description: GitHub 或本地来源存储无法核实；不标记 verified_source}
+  /v1/hooks/github:
+    post:
+      security: []
+      summary: GitHub App 的签名 push 和安装/用户授权撤销 webhook 收件
+      description: |
+        验证原始请求 HMAC-SHA256 和 X-GitHub-Delivery 去重，匹配已 verified 的
+        installationId/repositoryId 并用 GitHub API 重新核验仓库。
+        pending_commit_verification 只是接收固定 SHA 的候选事件。已签 github_app_authorization
+        撤销或 installation/installation_repositories 移除会关闭受影响的绑定与待处理来源；
+        历史已上线网站的停用另按运维策略处理，不由本接口无审计地删除。
+      parameters:
+        - in: header
+          name: X-Hub-Signature-256
+          required: true
+          schema: {type: string}
+        - in: header
+          name: X-GitHub-Delivery
+          required: true
+          schema: {type: string}
+        - in: header
+          name: X-GitHub-Event
+          required: true
+          schema: {type: string, enum: [push, github_app_authorization, installation, installation_repositories]}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {type: object}
+      responses:
+        '202': {description: 新事件已登记为待核验提交或被忽略}
+        '200': {description: 已登记的相同 delivery 重试}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '413': {description: 事件体超过 256 KiB}
+        '422': {$ref: '#/components/responses/Invalid'}
+        '503': {description: GitHub App 身份或数据库不可核验，可重试}
+  /v1/oauth/github/callback:
+    get:
+      security: []
+      summary: GitHub App 用户授权回调；只接受直接 HTTPS
+      description: |
+        对 10 分钟一次性 state、Owner 当前角色/令牌、用户仓库 pull 权限、App 安装单仓库权限
+        四重校验后才写 verified 绑定；记录数值 GitHub 用户 ID 以支持授权撤销事件。
+        短期用户访问 Token/刷新 Token 仅在本次请求内使用，不持久化或返回浏览器。
+      parameters:
+        - in: query
+          name: state
+          required: true
+          schema: {type: string}
+        - in: query
+          name: code
+          required: true
+          schema: {type: string}
+      responses:
+        '200':
+          description: 双侧授权已确认，仓库绑定生效
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/GitHubBinding'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '503': {description: GitHub 或数据库暂不可核实，绑定不升级}
+  /v1/teams/{teamId}/tokens:
+    parameters:
+      - $ref: '#/components/parameters/TeamId'
+    post:
+      summary: Owner 创建受限访问令牌
+      description: Agent 必须指定 projectId 与所需的 projects:read/sources:read/sources:upload/deployments:create/deployments:read/previews:read 操作；token 只在 201 时返回。
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [role]
+              additionalProperties: false
+              properties:
+                role: {type: string, enum: [owner, developer, viewer, agent]}
+                projectId: {type: string}
+                actions:
+                  type: array
+                  items: {type: string, enum: ['projects:read', 'sources:read', 'sources:upload', 'deployments:create', 'deployments:read', 'previews:read']}
+      responses:
+        '201':
+          description: 已生成短期令牌，只返回一次
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [id, token, expiresAt]
+                properties:
+                  id: {type: string}
+                  token: {type: string}
+                  expiresAt: {type: string, format: date-time}
+        '200': {description: 相同请求重试，仅返回令牌 ID}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '422': {$ref: '#/components/responses/Invalid'}
+  /v1/teams/{teamId}/tokens/{tokenId}:
+    parameters:
+      - $ref: '#/components/parameters/TeamId'
+      - in: path
+        name: tokenId
+        required: true
+        schema: {type: string}
+    delete:
+      summary: Owner 吊销本 Team 令牌
+      responses:
+        '200': {description: 已吊销或此前已吊销}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+  parameters:
+    TeamId:
+      in: path
+      name: teamId
+      required: true
+      schema: {type: string}
+    ProjectId:
+      in: path
+      name: projectId
+      required: true
+      schema: {type: string}
+    DeploymentId:
+      in: path
+      name: deploymentId
+      required: true
+      schema: {type: string}
+    IdempotencyKey:
+      in: header
+      name: Idempotency-Key
+      required: true
+      schema: {type: string, minLength: 1, maxLength: 128}
+  schemas:
+    ResourceAmount:
+      type: object
+      required: [cpuMilli, memoryMiB, storageMiB]
+      properties:
+        cpuMilli: {type: integer, format: int64, minimum: 0, description: 预留的毫核数，不表示实际 CPU 使用量}
+        memoryMiB: {type: integer, format: int64, minimum: 0}
+        storageMiB: {type: integer, format: int64, minimum: 0}
+    ResourceBudgetChange:
+      type: object
+      additionalProperties: false
+      required: [expectedVersion, cpuMilli, memoryMiB, storageMiB]
+      properties:
+        expectedVersion: {type: integer, format: int64, minimum: 0}
+        cpuMilli: {type: integer, minimum: 100, maximum: 100000}
+        memoryMiB: {type: integer, minimum: 128, maximum: 1048576}
+        storageMiB: {type: integer, minimum: 128, maximum: 1048576}
+    ResourceReservationChange:
+      type: object
+      additionalProperties: false
+      required: [expectedVersion, cpuMilli, memoryMiB, storageMiB]
+      description: 三个资源全部为零表示释放；非零时 CPU 至少 100m，内存/存储至少 128 MiB。
+      properties:
+        expectedVersion: {type: integer, format: int64, minimum: 0}
+        cpuMilli: {type: integer, minimum: 0, maximum: 100000}
+        memoryMiB: {type: integer, minimum: 0, maximum: 1048576}
+        storageMiB: {type: integer, minimum: 0, maximum: 1048576}
+    TeamResourceSummary:
+      type: object
+      required: [teamId, version, budget, reserved, available, state]
+      properties:
+        teamId: {type: string}
+        version: {type: integer, format: int64}
+        budget: {$ref: '#/components/schemas/ResourceAmount'}
+        reserved: {$ref: '#/components/schemas/ResourceAmount'}
+        available: {$ref: '#/components/schemas/ResourceAmount'}
+        state: {type: string, enum: [budgeted_not_provisioned]}
+    ProjectResourceReservation:
+      type: object
+      required: [teamId, projectId, version, resources, state]
+      properties:
+        teamId: {type: string}
+        projectId: {type: string}
+        version: {type: integer, format: int64}
+        resources: {$ref: '#/components/schemas/ResourceAmount'}
+        state: {type: string, enum: [unallocated, reserved_not_provisioned]}
+    Project:
+      type: object
+      required: [id, teamId, slug, name, status]
+      properties:
+        id: {type: string}
+        teamId: {type: string}
+        slug: {type: string}
+        name: {type: string}
+        status: {type: string, enum: [not_deployed, active]}
+    StaticDeployment:
+      type: object
+      required: [deploymentId, desiredHost, desiredState, observedState, statusUrl]
+      properties:
+        deploymentId: {type: string}
+        desiredHost: {type: string}
+        desiredState: {type: string, enum: [candidate]}
+        observedState: {type: string, enum: [not_deployed, preview_ready]}
+        statusUrl: {type: string}
+    ProductionAlias:
+      type: object
+      required: [desiredHost, deploymentId, desiredGeneration, observedGeneration, state]
+      properties:
+        desiredHost: {type: string}
+        deploymentId: {type: string}
+        desiredGeneration: {type: integer, format: int64}
+        observedGeneration: {type: integer, format: int64}
+        state: {type: string, enum: [requested, active]}
+    UploadedSource:
+      type: object
+      required: [sourceId, sha256, size, files, status]
+      properties:
+        sourceId: {type: string}
+        sha256: {type: string, pattern: '^[0-9a-f]{64}$'}
+        size: {type: integer, minimum: 1, maximum: 1048576}
+        files: {type: integer, minimum: 1, maximum: 128}
+        status: {type: string, enum: [stored_unverified]}
+    GitHubBinding:
+      type: object
+      required: [teamId, projectId, installationId, repositoryId, fullName, defaultBranch, status]
+      properties:
+        teamId: {type: string}
+        projectId: {type: string}
+        installationId: {type: integer, format: int64}
+        repositoryId: {type: integer, format: int64}
+        fullName: {type: string}
+        defaultBranch: {type: string}
+        status: {type: string, enum: [pending, verified, revoked]}
+    PinnedGitSource:
+      type: object
+      required: [sourceId, commitSha, treeSha, archiveSha256, size, status]
+      properties:
+        sourceId: {type: string}
+        commitSha: {type: string, pattern: '^[0-9a-f]{40}$'}
+        treeSha: {type: string, pattern: '^[0-9a-f]{40}$'}
+        archiveSha256: {type: string, pattern: '^[0-9a-f]{64}$'}
+        size: {type: integer, minimum: 1, maximum: 1048576}
+        status: {type: string, enum: [verified_source]}
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code]
+          properties:
+            code: {type: string}
+  responses:
+    Unauthorized:
+      description: 未认证或令牌已过期/吊销
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+    Forbidden:
+      description: 同 Team 角色不足
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+    NotFound:
+      description: 不存在或跨 Team
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+    Conflict:
+      description: ID、幂等请求或状态冲突
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+    Invalid:
+      description: 请求格式或作用域无效
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+  requestBodies:
+    AliasRequest:
+      required: true
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [deploymentId, expectedGeneration]
+            additionalProperties: false
+            properties:
+              deploymentId: {type: string}
+              expectedGeneration: {type: integer, format: int64, minimum: 0}

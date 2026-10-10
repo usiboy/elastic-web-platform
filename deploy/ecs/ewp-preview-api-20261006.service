@@ -1,0 +1,23 @@
+[Unit]
+Description=Elastic Web Platform control API (persistent synthetic trial)
+Wants=docker.service
+After=docker.service network.target
+StartLimitIntervalSec=0
+RequiresMountsFor=/data/ewp-preview-20261006
+
+[Service]
+Type=simple
+EnvironmentFile=/data/ewp-preview-20261006/private/api.env
+WorkingDirectory=/data/ewp-preview-20261006/bin
+ExecStart=/data/ewp-preview-20261006/bin/ewp-api-linux-amd64
+NoNewPrivileges=yes
+MemoryMax=805306368
+CPUQuota=100%
+PrivateTmp=yes
+ProtectHome=yes
+Restart=on-failure
+RestartSec=2
+TimeoutStopSec=10
+
+[Install]
+WantedBy=multi-user.target

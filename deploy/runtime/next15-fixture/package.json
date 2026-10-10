@@ -1,0 +1,15 @@
+{
+  "name": "ewp-r2-next15-synthetic-fixture",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "build": "next build && node tools/prepare-standalone.mjs",
+    "start": "node .next/standalone/server.js",
+    "test:runtime": "node --test tests/*.test.mjs"
+  },
+  "dependencies": {
+    "next": "15.5.27",
+    "react": "19.1.1",
+    "react-dom": "19.1.1"
+  }
+}

@@ -1,0 +1,17 @@
+[Unit]
+Description=Approved A/B OIDC isolated Builder trial (one source per run)
+Wants=ewp-builder-dockerd-20261007.service ewp-preview-api-20261006.service
+After=ewp-builder-dockerd-20261007.service ewp-preview-api-20261006.service
+RequiresMountsFor=/data/ewp-preview-20261006 /data/ewp-builder-20261007
+
+[Service]
+Type=oneshot
+EnvironmentFile=/data/ewp-preview-20261006/private/actions-worker.env
+WorkingDirectory=/data/ewp-preview-20261006/bin
+ExecStart=/data/ewp-preview-20261006/bin/ewp-actions-builder-pilot-linux-amd64
+TimeoutStartSec=180
+NoNewPrivileges=yes
+ProtectHome=yes
+PrivateTmp=yes
+MemoryMax=805306368
+CPUQuota=100%

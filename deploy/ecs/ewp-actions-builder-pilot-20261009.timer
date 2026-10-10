@@ -1,0 +1,10 @@
+[Unit]
+Description=Poll only the two approved GitHub Actions OIDC build jobs
+
+[Timer]
+OnBootSec=2min
+OnUnitInactiveSec=30s
+Unit=ewp-actions-builder-pilot-20261009.service
+
+[Install]
+WantedBy=timers.target

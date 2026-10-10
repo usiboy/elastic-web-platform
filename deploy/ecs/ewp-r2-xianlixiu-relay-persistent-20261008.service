@@ -1,0 +1,15 @@
+[Unit]
+Description=Unix relay for credential-disabled synthetic Xianlixiu
+Requires=ewp-r2-xianlixiu-synthetic-20261008.service
+After=ewp-r2-xianlixiu-synthetic-20261008.service
+RequiresMountsFor=/data/ewp-builder-20261007
+
+[Service]
+Type=simple
+ExecStart=/bin/bash /data/ewp-builder-20261007/state/run_r2_xianlixiu_relay.sh
+Restart=on-failure
+RestartSec=2
+TimeoutStartSec=15
+
+[Install]
+WantedBy=multi-user.target

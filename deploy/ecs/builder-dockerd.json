@@ -1,0 +1,19 @@
+{
+  "data-root": "/data/ewp-builder-20261007/docker",
+  "exec-root": "/run/ewp-builder-20261007",
+  "hosts": ["unix:///run/ewp-builder-20261007/docker.sock"],
+  "pidfile": "/run/ewp-builder-20261007/dockerd.pid",
+  "containerd": "/run/containerd/containerd.sock",
+  "containerd-namespace": "ewp-builder-20261007",
+  "containerd-plugins-namespace": "ewp-builder-plugins-20261007",
+  "bridge": "none",
+  "iptables": false,
+  "ip-forward": false,
+  "ip-masq": false,
+  "userland-proxy": false,
+  "exec-opts": ["native.cgroupdriver=cgroupfs"],
+  "default-runtime": "runsc",
+  "runtimes": {"runsc": {"path": "/usr/local/bin/runsc"}},
+  "log-driver": "json-file",
+  "log-opts": {"max-size": "2m", "max-file": "2"}
+}

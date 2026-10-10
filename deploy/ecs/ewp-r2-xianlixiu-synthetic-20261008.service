@@ -1,0 +1,14 @@
+[Unit]
+Description=Recover only the credential-disabled synthetic Xianlixiu sandbox
+Wants=ewp-builder-dockerd-20261007.service ewp-r2-next-runtime-20261008.service
+After=ewp-builder-dockerd-20261007.service ewp-r2-next-runtime-20261008.service docker.service
+RequiresMountsFor=/data/ewp-builder-20261007
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/bash /data/ewp-builder-20261007/state/recover_r2_xianlixiu_container.sh
+TimeoutStartSec=30
+
+[Install]
+WantedBy=multi-user.target

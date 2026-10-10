@@ -1,0 +1,14 @@
+[Unit]
+Description=Recover fixed synthetic Next 15 sandbox on isolated Builder daemon
+Wants=ewp-builder-dockerd-20261007.service
+After=ewp-builder-dockerd-20261007.service docker.service
+RequiresMountsFor=/data/ewp-builder-20261007
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/bash /data/ewp-builder-20261007/state/recover_r2_next_container.sh
+TimeoutStartSec=30
+
+[Install]
+WantedBy=multi-user.target

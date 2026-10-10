@@ -1,0 +1,15 @@
+[Unit]
+Description=Root-only Unix relay for fixed synthetic Next runtime
+Requires=ewp-r2-next-runtime-20261008.service
+After=ewp-r2-next-runtime-20261008.service
+RequiresMountsFor=/data/ewp-builder-20261007
+
+[Service]
+Type=simple
+ExecStart=/bin/bash /data/ewp-builder-20261007/state/run_r2_relay_persistent.sh
+Restart=on-failure
+RestartSec=2
+TimeoutStartSec=15
+
+[Install]
+WantedBy=multi-user.target

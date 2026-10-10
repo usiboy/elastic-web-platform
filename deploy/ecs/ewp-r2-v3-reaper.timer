@@ -1,0 +1,11 @@
+[Unit]
+Description=Check synthetic R2 v3 failure every 2 seconds
+
+[Timer]
+OnBootSec=10s
+OnUnitActiveSec=2s
+AccuracySec=1s
+Unit=ewp-r2-v3-reaper.service
+
+[Install]
+WantedBy=timers.target

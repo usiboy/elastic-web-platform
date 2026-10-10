@@ -1,0 +1,20 @@
+[Unit]
+Description=Elastic Web Platform isolated Builder Docker daemon (same ECS trial)
+Requires=containerd.service
+After=containerd.service
+RequiresMountsFor=/data/ewp-builder-20261007
+
+[Service]
+Type=notify
+ExecStartPre=/usr/bin/python3 -c "import os,sys;sys.exit(os.stat('/proc/1/ns/net').st_ino==os.stat('/proc/self/ns/net').st_ino)"
+ExecStart=/usr/bin/dockerd --config-file=/data/ewp-builder-20261007/state/builder-dockerd.json
+RuntimeDirectory=ewp-builder-20261007
+RuntimeDirectoryMode=0700
+PrivateNetwork=yes
+Restart=on-failure
+RestartSec=2
+Delegate=yes
+TasksMax=infinity
+
+[Install]
+WantedBy=multi-user.target

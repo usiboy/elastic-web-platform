@@ -1,0 +1,12 @@
+{
+  "name": "ewp-r2-xianlixiu-synthetic-runtime",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "build": "node build.mjs",
+    "test:runtime": "node test.mjs"
+  },
+  "dependencies": {
+    "unzipper": "0.10.14"
+  }
+}

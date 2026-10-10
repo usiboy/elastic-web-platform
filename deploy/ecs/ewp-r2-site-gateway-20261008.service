@@ -1,0 +1,24 @@
+[Unit]
+Description=Elastic Web Platform TLS Gateway with synthetic runtime recovery
+Wants=ewp-preview-api-20261006.service ewp-r2-relay-persistent-20261008.service
+After=ewp-preview-api-20261006.service ewp-r2-relay-persistent-20261008.service
+StartLimitIntervalSec=0
+RequiresMountsFor=/data/ewp-preview-20261006
+
+[Service]
+Type=simple
+EnvironmentFile=/data/ewp-preview-20261006/private/site.env
+WorkingDirectory=/data/ewp-preview-20261006/bin
+ExecStartPre=/bin/bash /data/ewp-preview-20261006/state/wait_r2_boot_readiness.sh
+ExecStart=/data/ewp-preview-20261006/bin/ewp-site-gateway-linux-amd64
+NoNewPrivileges=yes
+MemoryMax=805306368
+CPUQuota=100%
+PrivateTmp=yes
+ProtectHome=yes
+Restart=on-failure
+RestartSec=2
+TimeoutStopSec=10
+
+[Install]
+WantedBy=multi-user.target

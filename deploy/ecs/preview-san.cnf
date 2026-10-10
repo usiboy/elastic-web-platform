@@ -1,0 +1,11 @@
+basicConstraints = critical, CA:FALSE
+keyUsage = critical, digitalSignature, keyEncipherment
+extendedKeyUsage = serverAuth
+subjectAltName = @names
+
+[names]
+DNS.1 = console.ecp.lingtong.com
+DNS.2 = a.preview.ecp.lingtong.com
+DNS.3 = b.preview.ecp.lingtong.com
+DNS.4 = *.preview.ecp.lingtong.com
+DNS.5 = *.sites.ecp.lingtong.com
